@@ -1,0 +1,6 @@
+监听器位置：
+record_demos
+examples -usb -config:      if not fake_env:
+                               env = SpacemouseIntervention(env)
+
+serl_robot_infra -franka_env -envs -wrappers
