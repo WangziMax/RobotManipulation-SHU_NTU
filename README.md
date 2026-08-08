@@ -36,6 +36,13 @@ conda activate lerobot
 pip install -e ".[hilserl]"
 ```
 
+该算法在mujoco环境下运行，该环境包含在gym_hil包中，为提供pick_place场景，需将gym_hil包中的scene.xml文件替换为下面路径的xml文件：
+
+```bash
+/lerobot/src/scene.xml
+```
+
+
 ## 数据采集与环境交互
 
 离线数据已经采集完成，并保存到了 Hugging Face 仓库中。相关配置可参考：
