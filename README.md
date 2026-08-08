@@ -88,17 +88,5 @@ python -m lerobot.rl.actor \
   --resume=true
 ```
 
-如果你的 checkpoint 实际路径不在 `src/outputs`，请根据本机路径修改 `--config_path`。
 
-
-
-### 3. gym_hil 包位置
-
-当前环境中的 `gym_hil` 包位置示例：
-
-```text
-/home/likaizhen/miniconda3/envs/lerobot/lib/python3.12/site-packages/gym_hil/
-```
-
-如果使用其他 Conda 环境或 Python 版本，实际路径可能不同。
 
