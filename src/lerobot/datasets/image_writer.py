@@ -177,6 +177,13 @@ class AsyncImageWriter:
         if isinstance(image, torch.Tensor):
             # Convert tensor to numpy array to minimize main process time
             image = image.cpu().numpy()
+
+            # 修复 float 0~255 图像
+        if isinstance(image, np.ndarray):
+            if image.dtype in [np.float32, np.float64]:
+                if image.max() > 1.0:
+                    image = image.astype(np.uint8)
+                    
         self.queue.put((image, fpath, compress_level))
 
     def wait_until_done(self):

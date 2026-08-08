@@ -33,7 +33,7 @@ from lerobot.processor import (
 )
 from lerobot.utils.rotation import Rotation
 
-
+'''正逆运动学转换'''
 @ProcessorStepRegistry.register("ee_reference_and_delta")
 @dataclass
 class EEReferenceAndDelta(RobotActionProcessorStep):

@@ -314,6 +314,11 @@ def act_with_policy(
         with policy_timer:
             normalized_observation = preprocessor.process_observation(observation)
             action = policy.select_action(batch=normalized_observation)
+
+            # added_action = torch.ones((action.shape[0], 1), device='cuda:0')
+            # action = torch.cat((action, added_action), dim=1) # add gripper
+            print("注意ACTION SHAPE:", action.shape, action)
+
             # Unnormalize only the continuous part.
             if cfg.policy.num_discrete_actions is not None:
                 continuous_action = postprocessor.process_action(action[..., :-1])

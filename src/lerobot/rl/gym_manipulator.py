@@ -720,6 +720,12 @@ def control_loop(
                 action_to_record = transition[TransitionKey.COMPLEMENTARY_DATA].get(
                     "teleop_action", transition[TransitionKey.ACTION]
                 )
+                # # 修正维度
+                # if use_gripper:
+                # # 保证最后一维是 gripper
+                #     if len(action_to_record) > 4:
+                #         action_to_record = action_to_record[:4]
+                #         print(action_to_record)
                 frame = {
                     **observation,
                     ACTION: action_to_record.cpu(),

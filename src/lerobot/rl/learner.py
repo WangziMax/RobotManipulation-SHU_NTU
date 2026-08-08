@@ -248,6 +248,8 @@ def start_learner_threads(
         logging.info("[LEARNER] Training process stopped")
     except Exception:
         logging.exception("[LEARNER] Unhandled exception in training loop")
+        import traceback
+        traceback.print_exc()
         shutdown_event.set()
     finally:
         logging.info("[LEARNER] Closing queues")
@@ -964,6 +966,13 @@ def process_transitions(
         transition_list = bytes_to_transitions(buffer=transition_list)
 
         for transition in transition_list:
+            
+             # ===== force action dim to 3 =====
+            # if transition[ACTION].shape[-1] > 3:
+            #     transition[ACTION] = transition[ACTION][..., :3]
+            #     print(transition[ACTION].size)
+
+
             # Skip transitions with NaN values
             if check_nan_in_transition(
                 observations=transition["state"],

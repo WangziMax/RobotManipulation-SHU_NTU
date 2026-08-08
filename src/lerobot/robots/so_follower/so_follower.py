@@ -33,7 +33,7 @@ from .config_so_follower import SOFollowerRobotConfig
 
 logger = logging.getLogger(__name__)
 
-
+'''存放机械臂具体参数（电机ID、过流保护、摄像头端口）'''
 class SOFollower(Robot):
     """
     Generic SO follower base implementing common functionality for SO-100/101/10X.
