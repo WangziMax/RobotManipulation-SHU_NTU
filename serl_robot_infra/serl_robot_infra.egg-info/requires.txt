@@ -1,0 +1,12 @@
+gymnasium
+pyrealsense2
+opencv-python
+pyquaternion
+pyspacemouse
+hidapi
+pyyaml
+rospkg
+scipy
+requests
+flask
+defusedxml

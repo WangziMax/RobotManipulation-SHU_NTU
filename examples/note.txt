@@ -1,0 +1,11 @@
+export CONDA_SITE=/data0/miniconda3/envs/hilserl/lib/python3.10/site-packages
+PYTHONNOUSERSITE=1 \
+CUDA_ROOT=/usr/local/cuda \
+CUDA_HOME=/usr/local/cuda \
+LD_LIBRARY_PATH=$CONDA_SITE/nvidia/cudnn/lib:$CONDA_SITE/nvidia/cublas/lib:$CONDA_SITE/nvidia/cuda_runtime/lib:$CONDA_SITE/nvidia/cusolver/lib:$CONDA_SITE/nvidia/cusparse/lib:$CONDA_SITE/nvidia/cufft/lib:$CONDA_SITE/nvidia/nccl/lib:$CONDA_SITE/nvidia/cuda_nvrtc/lib:/usr/local/cuda/lib64:$LD_LIBRARY_PATH \
+python record_demos.py --exp_name usb_pickup_insertion
+
+PYTHONNOUSERSITE=1        防止加载 ~/.local 的混乱 Python 包
+CUDA_ROOT/CUDA_HOME       指定系统 CUDA 根目录
+LD_LIBRARY_PATH           指定优先加载 conda 环境里的 cuDNN/CUDA 动态库
+CONDA_SITE                只是路径缩写

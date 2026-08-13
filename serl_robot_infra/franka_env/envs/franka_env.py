@@ -18,6 +18,15 @@ from franka_env.camera.rs_capture import RSCapture
 from franka_env.utils.rotations import euler_2_quat, quat_2_euler
 
 
+def _clip_euler_to_limits(euler, lower, upper):
+    """Unwrap Euler angles around the configured interval before clipping."""
+    lower = np.asarray(lower, dtype=np.float64)
+    upper = np.asarray(upper, dtype=np.float64)
+    center = (lower + upper) / 2.0
+    unwrapped = center + (np.asarray(euler) - center + np.pi) % (2 * np.pi) - np.pi
+    return np.clip(unwrapped, lower, upper)
+
+
 class ImageDisplayer(threading.Thread):
     def __init__(self, queue, name):
         threading.Thread.__init__(self)
@@ -32,7 +41,7 @@ class ImageDisplayer(threading.Thread):
                 break
 
             frame = np.concatenate(
-                [cv2.resize(v, (128, 128)) for k, v in img_array.items() if "full" not in k], axis=1
+                [cv2.resize(v, (256, 256)) for k, v in img_array.items() if "full" not in k], axis=1
             )
 
             try:
@@ -100,12 +109,16 @@ class FrankaEnv(gym.Env):
         self.max_episode_length = config.MAX_EPISODE_LENGTH
         self.display_image = config.DISPLAY_IMAGE
         self.gripper_sleep = config.GRIPPER_SLEEP
+        self.debug_commands = os.environ.get("SERL_COMMAND_DEBUG", "0") == "1"
 
         # convert last 3 elements from euler to quat, from size (6,) to (7,)
         self.resetpos = np.concatenate(
             [config.RESET_POSE[:3], euler_2_quat(config.RESET_POSE[3:])]
         )
-        self._update_currpos()
+        self._init_fake_state()
+        if not fake_env:
+            self._update_currpos()
+        self.commanded_orientation = self.currpos[3:].copy()
         self.last_gripper_act = time.time()
         self.lastsent = time.time()
         self.randomreset = config.RANDOM_RESET
@@ -191,20 +204,10 @@ class FrankaEnv(gym.Env):
         pose[:3] = np.clip(
             pose[:3], self.xyz_bounding_box.low, self.xyz_bounding_box.high
         )
-        euler = Rotation.from_quat(pose[3:]).as_euler("xyz")
-
-        # Clip first euler angle separately due to discontinuity from pi to -pi
-        sign = np.sign(euler[0])
-        euler[0] = sign * (
-            np.clip(
-                np.abs(euler[0]),
-                self.rpy_bounding_box.low[0],
-                self.rpy_bounding_box.high[0],
-            )
-        )
-
-        euler[1:] = np.clip(
-            euler[1:], self.rpy_bounding_box.low[1:], self.rpy_bounding_box.high[1:]
+        euler = _clip_euler_to_limits(
+            Rotation.from_quat(pose[3:]).as_euler("xyz"),
+            self.rpy_bounding_box.low,
+            self.rpy_bounding_box.high,
         )
         pose[3:] = Rotation.from_euler("xyz", euler).as_quat()
 
@@ -214,21 +217,38 @@ class FrankaEnv(gym.Env):
         """standard gym step function."""
         start_time = time.time()
         action = np.clip(action, self.action_space.low, self.action_space.high)
+        skip_motion_command = np.all(np.abs(action) < 1e-6)
         xyz_delta = action[:3]
 
         self.nextpos = self.currpos.copy()
         self.nextpos[:3] = self.nextpos[:3] + xyz_delta * self.action_scale[0]
+        if self.debug_commands and np.linalg.norm(action) > 1e-6:
+            print(
+                "[FrankaEnv] action xyz: "
+                f"{np.round(action[:3], 3)} curr xyz: {np.round(self.currpos[:3], 4)} "
+                f"next xyz: {np.round(self.nextpos[:3], 4)}"
+            )
 
-        # GET ORIENTATION FROM ACTION
+        # Action deltas are expressed in the base frame. RelativeFrame converts
+        # end-effector-frame actions before they reach this environment.
         self.nextpos[3:] = (
             Rotation.from_rotvec(action[3:6] * self.action_scale[1])
-            * Rotation.from_quat(self.currpos[3:])
+            * Rotation.from_quat(self.commanded_orientation)
         ).as_quat()
 
         gripper_action = action[6] * self.action_scale[2]
 
-        self._send_gripper_command(gripper_action)
-        self._send_pos_command(self.clip_safety_box(self.nextpos))
+        if not skip_motion_command:
+            self._send_gripper_command(gripper_action)
+        target = self.clip_safety_box(self.nextpos.copy())
+        self.commanded_orientation = target[3:].copy()
+        if self.debug_commands and not np.allclose(target[:3], self.nextpos[:3]):
+            print(
+                "[FrankaEnv] clipped xyz: "
+                f"{np.round(self.nextpos[:3], 4)} -> {np.round(target[:3], 4)}"
+            )
+        if not skip_motion_command:
+            self._send_pos_command(target)
 
         self.curr_path_length += 1
         dt = time.time() - start_time
@@ -298,6 +318,7 @@ class FrankaEnv(gym.Env):
             self._send_pos_command(p)
             time.sleep(1 / self.hz)
         self.nextpos = p
+        self.commanded_orientation = p[3:].copy()
         self._update_currpos()
 
     def go_to_reset(self, joint_reset=False):
@@ -355,6 +376,7 @@ class FrankaEnv(gym.Env):
         self.curr_path_length = 0
 
         self._update_currpos()
+        self.commanded_orientation = self.currpos[3:].copy()
         obs = self._get_obs()
         self.terminate = False
         return obs, {"succeed": False}
@@ -423,6 +445,8 @@ class FrankaEnv(gym.Env):
         self._recover()
         arr = np.array(pos).astype(np.float32)
         data = {"arr": arr.tolist()}
+        if self.debug_commands:
+            print(f"[FrankaEnv] pose target xyz: {np.round(arr[:3], 4)}")
         requests.post(self.url + "pose", json=data)
 
     def _send_gripper_command(self, pos: float, mode="binary"):
@@ -456,7 +480,20 @@ class FrankaEnv(gym.Env):
         self.q = np.array(ps["q"])
         self.dq = np.array(ps["dq"])
 
-        self.curr_gripper_pos = np.array(ps["gripper_pos"])
+        gripper_pos = float(ps["gripper_pos"])
+        if 0.0 <= gripper_pos <= 0.08:
+            gripper_pos = gripper_pos / 0.08
+        self.curr_gripper_pos = np.array(gripper_pos)
+
+    def _init_fake_state(self):
+        self.currpos = self.resetpos.copy()
+        self.currvel = np.zeros(6, dtype=np.float64)
+        self.currforce = np.zeros(3, dtype=np.float64)
+        self.currtorque = np.zeros(3, dtype=np.float64)
+        self.currjacobian = np.zeros((6, 7), dtype=np.float64)
+        self.q = np.zeros(7, dtype=np.float64)
+        self.dq = np.zeros(7, dtype=np.float64)
+        self.curr_gripper_pos = np.array(0.0)
 
     def update_currpos(self):
         """
@@ -473,7 +510,10 @@ class FrankaEnv(gym.Env):
         self.q = np.array(ps["q"])
         self.dq = np.array(ps["dq"])
 
-        self.curr_gripper_pos = np.array(ps["gripper_pos"])
+        gripper_pos = float(ps["gripper_pos"])
+        if 0.0 <= gripper_pos <= 0.08:
+            gripper_pos = gripper_pos / 0.08
+        self.curr_gripper_pos = np.array(gripper_pos)
 
     def _get_obs(self) -> dict:
         images = self.get_im()

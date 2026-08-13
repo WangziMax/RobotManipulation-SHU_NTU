@@ -67,7 +67,6 @@ test_route("/clearerr")
 # 关节复位测试 (取消注释将控制实体机器人运动！)
 # while True:
 #     test_route("/jointreset")
-#     time.sleep(0.01)
 
 # 笛卡尔空间异步移动测试 (取消注释将控制实体机器人运动！)
 # 示例数据：[x, y, z, qx, qy, qz, qw]

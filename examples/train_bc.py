@@ -12,6 +12,7 @@ import os
 import pickle as pkl
 from gymnasium.wrappers.record_episode_statistics import RecordEpisodeStatistics
 
+import local_imports  # noqa: F401
 from serl_launcher.agents.continuous.bc import BCAgent
 
 from serl_launcher.utils.launcher import (

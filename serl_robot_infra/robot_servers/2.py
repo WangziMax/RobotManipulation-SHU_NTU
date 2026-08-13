@@ -1,29 +1,15 @@
 import requests
 import json
-import sys
-import os
-
-# 针对 Linux 终端的单键捕获（无需按回车）
-if os.name == 'posix':
-    import tty
-    import termios
-    def getch():
-        fd = sys.stdin.fileno()
-        old_settings = termios.tcgetattr(fd)
-        try:
-            tty.setraw(sys.stdin.fileno())
-            ch = sys.stdin.read(1)
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        return ch
-else:
-    # Windows 备用
-    import msvcrt
-    def getch():
-        return msvcrt.getch().decode('utf-8')
+import time
+from pynput import keyboard
 
 BASE_URL = "http://127.0.0.1:5000"
-MOVE_STEP = 0.1  # 单次按键移动步长：1mm
+CONTROL_HZ = 30
+MOVE_SPEED = 0.05  # m/s
+POSITION_TOLERANCE = 0.001  # m；上一航点到位后才继续推进
+
+pressed_keys = set()
+running = True
 
 def test_endpoint(endpoint, method="POST", data=None):
     url = f"{BASE_URL}{endpoint}"
@@ -42,9 +28,71 @@ def test_endpoint(endpoint, method="POST", data=None):
         print(f"[{method}] {endpoint} -> 请求失败: {e}")
     print("-" * 50)
 
+def get_pose():
+    response = requests.post(f"{BASE_URL}/getpos", timeout=2)
+    response.raise_for_status()
+    return response.json()["pose"]
+
+def get_gripper_pos():
+    try:
+        response = requests.post(f"{BASE_URL}/get_gripper", timeout=1)
+        response.raise_for_status()
+        return response.json().get("gripper", 0.0)
+    except Exception:
+        return 0.0
+
+def send_pose(pose):
+    response = requests.post(f"{BASE_URL}/pose", json={"arr": pose}, timeout=1)
+    response.raise_for_status()
+
+def position_target_reached(actual_pose, target_pose):
+    return all(
+        abs(actual_pose[i] - target_pose[i]) <= POSITION_TOLERANCE
+        for i in range(3)
+    )
+
+def run_gripper(endpoint, desc):
+    try:
+        response = requests.post(f"{BASE_URL}{endpoint}", timeout=2)
+        response.raise_for_status()
+        print(f"\n夹爪动作完成: {desc}")
+    except Exception as e:
+        print(f"\n发送夹爪指令失败 ({desc}): {e}")
+
+def on_press(key):
+    global running
+
+    try:
+        key_name = key.char.lower()
+    except AttributeError:
+        if key == keyboard.Key.esc:
+            running = False
+            return False
+        return
+
+    pressed_keys.add(key_name)
+
+    if key_name == 'o':
+        run_gripper("/open_gripper", "打开夹爪")
+    elif key_name == 'c':
+        run_gripper("/close_gripper", "快速关闭夹爪")
+    elif key_name == 'v':
+        run_gripper("/close_gripper_slow", "慢速关闭夹爪")
+    elif key_name == 'x':
+        running = False
+        return False
+
+def on_release(key):
+    try:
+        pressed_keys.discard(key.char.lower())
+    except AttributeError:
+        pass
+
 def keyboard_control_loop():
+    global running
+
     print("\n" + "="*50)
-    print(" 进入键盘控制模式 (位移步长: 5mm)")
+    print(" 进入键盘连续控制模式")
     print(" 机械臂键位:")
     print("   W / S : X轴 前 / 后")
     print("   A / D : Y轴 左 / 右")
@@ -54,107 +102,74 @@ def keyboard_control_loop():
     print("   C     : 快速关闭夹爪 (Close)")
     print("   V     : 慢速关闭夹爪 (Slow Close)")
     print(" 系统键位:")
-    print("   X     : 退出控制")
+    print("   X / ESC : 退出控制")
     print("="*50)
-    print("⚠️ 提示: 移动指令会阻塞直到位姿就位，请【点按】按键，切勿长按！\n")
+    print(f"提示: 按住按键连续移动，速度上限约 {MOVE_SPEED * 1000:.0f}mm/s。\n")
 
-    while True:
-        # 1. 获取当前最新位姿
-        try:
-            res = requests.post(f"{BASE_URL}/getpos").json()
-            curr_pose = res["pose"]
-        except Exception as e:
-            print(f"\n[错误] 无法获取当前机器人位姿: {e}")
-            break
+    try:
+        target_pose = get_pose()
+    except Exception as e:
+        print(f"\n[错误] 无法获取当前机器人位姿: {e}")
+        return
 
-        # 2. 获取当前夹爪状态
-        try:
-            g_res = requests.post(f"{BASE_URL}/get_gripper").json()
-            gripper_pos = g_res.get("gripper", 0.0)
-        except Exception:
-            gripper_pos = 0.0
+    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+    listener.start()
 
-        # 在行首实时打印最新的位置与夹爪开度
-        print(f"\r当前状态 -> X: {curr_pose[0]:.4f}, Y: {curr_pose[1]:.4f}, Z: {curr_pose[2]:.4f} | 夹爪开度: {gripper_pos:.4f}m | 指令...", end="")
-        
-        # 3. 捕获按键
-        key = getch().lower()
+    dt = 1.0 / CONTROL_HZ
+    last_status_time = 0.0
 
-        # 4. 解析按键
-        target_pose = curr_pose.copy()
-        is_move_command = False
-        is_gripper_command = False
-        action_desc = ""
-        gripper_endpoint = ""
+    try:
+        while running:
+            loop_start = time.time()
+            delta = [0.0, 0.0, 0.0]
 
-        # 机械臂移动分支
-        if key == 'w':
-            target_pose[0] += MOVE_STEP
-            action_desc = "X轴 +5mm"
-            is_move_command = True
-        elif key == 's':
-            target_pose[0] -= MOVE_STEP
-            action_desc = "X轴 -5mm"
-            is_move_command = True
-        elif key == 'a':
-            target_pose[1] += MOVE_STEP
-            action_desc = "Y轴 +5mm"
-            is_move_command = True
-        elif key == 'd':
-            target_pose[1] -= MOVE_STEP
-            action_desc = "Y轴 -5mm"
-            is_move_command = True
-        elif key == 'r':
-            target_pose[2] += MOVE_STEP
-            action_desc = "Z轴 +5mm"
-            is_move_command = True
-        elif key == 'f':
-            target_pose[2] -= MOVE_STEP
-            action_desc = "Z轴 -5mm"
-            is_move_command = True
-            
-        # 夹爪控制分支
-        elif key == 'o':
-            action_desc = "打开夹爪"
-            gripper_endpoint = "/open_gripper"
-            is_gripper_command = True
-        elif key == 'c':
-            action_desc = "快速关闭夹爪"
-            gripper_endpoint = "/close_gripper"
-            is_gripper_command = True
-        elif key == 'v':
-            action_desc = "慢速关闭夹爪"
-            gripper_endpoint = "/close_gripper_slow"
-            is_gripper_command = True
-            
-        elif key == 'x':
-            print("\n\n退出键盘控制模式。")
-            break
-        else:
-            continue  # 无效按键直接跳过
+            if 'w' in pressed_keys:
+                delta[0] += MOVE_SPEED * dt
+            if 's' in pressed_keys:
+                delta[0] -= MOVE_SPEED * dt
+            if 'a' in pressed_keys:
+                delta[1] += MOVE_SPEED * dt
+            if 'd' in pressed_keys:
+                delta[1] -= MOVE_SPEED * dt
+            if 'r' in pressed_keys:
+                delta[2] += MOVE_SPEED * dt
+            if 'f' in pressed_keys:
+                delta[2] -= MOVE_SPEED * dt
 
-        # 5. 执行指令
-        if is_move_command:
-            print(f"\n执行动作: {action_desc} -> 正在移动机械臂...")
-            try:
-                response = requests.post(f"{BASE_URL}/pose", json={"arr": target_pose})
-                if response.status_code == 200:
-                    print("机械臂移动就位。")
-                else:
-                    print(f"服务端异常状态码: {response.status_code}")
-            except Exception as e:
-                print(f"发送移动指令失败: {e}")
+            moved = any(abs(v) > 0.0 for v in delta)
+            if moved:
+                try:
+                    # 基于上一次命令目标累加，而不是基于实时反馈累加。
+                    # 否则 X/Y 的瞬时跟踪误差会被带入下一帧目标并持续漂移。
+                    actual_pose = get_pose()
+                    if position_target_reached(actual_pose, target_pose):
+                        next_target_pose = target_pose.copy()
+                        for i in range(3):
+                            next_target_pose[i] += delta[i]
 
-        elif is_gripper_command:
-            print(f"\n执行动作: {action_desc} -> 正在驱动夹爪...")
-            try:
-                response = requests.post(f"{BASE_URL}{gripper_endpoint}")
-                if response.status_code == 200:
-                    print(f"夹爪动作完成: {response.text}")
-                else:
-                    print(f"夹爪服务端异常状态码: {response.status_code}")
-            except Exception as e:
-                print(f"发送夹爪指令失败: {e}")
+                        # 只更新按键对应的位置分量；其余位置和姿态保持锁定。
+                        send_pose(next_target_pose)
+                        target_pose = next_target_pose
+                except Exception as e:
+                    print(f"\n发送移动指令失败: {e}")
+
+            now = time.time()
+            if now - last_status_time > 0.2:
+                gripper_pos = get_gripper_pos()
+                actual_pose = get_pose()
+                print(
+                    f"\rreal状态 -> X: {actual_pose[0]:.4f}, Y: {actual_pose[1]:.4f}, "
+                    f"Z: {actual_pose[2]:.4f} | 夹爪开度: {gripper_pos:.4f}m | "
+                    f"按住移动...",
+                    end="",
+                )
+                last_status_time = now
+
+            elapsed = time.time() - loop_start
+            time.sleep(max(0.0, dt - elapsed))
+    finally:
+        listener.stop()
+        print("\n\n退出键盘控制模式。")
 
 
 if __name__ == "__main__":

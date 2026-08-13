@@ -7,6 +7,8 @@ import requests
 import copy
 import gymnasium as gym
 import time
+import cv2
+import queue
 from franka_env.envs.franka_env import FrankaEnv
 
 class USBEnv(FrankaEnv):
@@ -19,14 +21,60 @@ class USBEnv(FrankaEnv):
             self.close_cameras()
 
         self.cap = OrderedDict()
+        caps_by_serial = {}
         for cam_name, kwargs in name_serial_dict.items():
-            if cam_name == "side_classifier":
-                self.cap["side_classifier"] = self.cap["side_policy"]
+            serial_number = kwargs["serial_number"]
+            if serial_number in caps_by_serial:
+                self.cap[cam_name] = caps_by_serial[serial_number]
             else:
                 cap = VideoCapture(
                     RSCapture(name=cam_name, **kwargs)
                 )
                 self.cap[cam_name] = cap
+                caps_by_serial[serial_number] = cap
+
+    def close_cameras(self):
+        """Close each physical camera once."""
+        try:
+            for cap in set(self.cap.values()):
+                cap.close()
+        except Exception as e:
+            print(f"Failed to close cameras: {e}")
+
+    def get_im(self):
+        """Get images, reusing one physical camera frame for multiple crops."""
+        images = {}
+        display_images = {}
+        full_res_images = {}
+        frames_by_cap = {}
+
+        for key, cap in self.cap.items():
+            try:
+                if cap not in frames_by_cap:
+                    frames_by_cap[cap] = cap.read()
+                rgb = frames_by_cap[cap]
+                cropped_rgb = self.config.IMAGE_CROP[key](rgb) if key in self.config.IMAGE_CROP else rgb
+                resized = cv2.resize(
+                    cropped_rgb, self.observation_space["images"][key].shape[:2][::-1]
+                )
+                images[key] = resized[..., ::-1]
+                display_images[key] = resized
+                display_images[key + "_full"] = cropped_rgb
+                full_res_images[key] = copy.deepcopy(cropped_rgb)
+            except queue.Empty:
+                input(
+                    f"{key} camera frozen. Check connect, then press enter to relaunch..."
+                )
+                cap.close()
+                self.init_cameras(self.config.REALSENSE_CAMERAS)
+                return self.get_im()
+
+        if self.save_video:
+            self.recording_frames.append(full_res_images)
+
+        if self.display_image:
+            self.img_queue.put(display_images)
+        return images
 
     def reset(self, **kwargs):
         self._recover()

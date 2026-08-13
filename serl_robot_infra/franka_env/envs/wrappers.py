@@ -1,4 +1,5 @@
 import time
+import os
 from gymnasium import Env, spaces
 import gymnasium as gym
 import numpy as np
@@ -223,12 +224,18 @@ class SpacemouseIntervention(gym.ActionWrapper):
 
         self.keyboard = keyboard
         self.key_states = {}  # 记录按键状态
+        self.key_press_times = {}
+        self.key_latch_seconds = float(os.environ.get("SERL_KEY_LATCH_SECONDS", "0.15"))
+        self.debug_keyboard = os.environ.get("SERL_KEYBOARD_DEBUG", "0") == "1"
         # 启动键盘监听（非阻塞）
         self.listener = keyboard.Listener(
             on_press=self._on_press,
             on_release=self._on_release
         )
         self.listener.start()
+        if self.debug_keyboard:
+            print("[KeyboardControl] listener started. Keys: W/S, A/D, R/F, arrows, O/C/V")
+            print("[KeyboardControl] actions are interpreted in the wrapped env action frame")
 
         self.left, self.right = False, False
         self.action_indices = action_indices
@@ -236,58 +243,71 @@ class SpacemouseIntervention(gym.ActionWrapper):
     # 键盘按下
     def _on_press(self, key):
         try:
-            self.key_states[key.char] = True
+            key_name = key.char.lower()
         except AttributeError:
-            self.key_states[key] = True
+            key_name = key
+        self.key_states[key_name] = True
+        self.key_press_times[key_name] = time.time()
+        if self.debug_keyboard:
+            print(f"[KeyboardControl] press: {key_name}")
 
     # 键盘松开
     def _on_release(self, key):
         try:
-            self.key_states[key.char] = False
+            key_name = key.char.lower()
         except AttributeError:
-            self.key_states[key] = False
+            key_name = key
+        self.key_states[key_name] = False
+        if self.debug_keyboard:
+            print(f"[KeyboardControl] release: {key_name}")
 
     # 获取键盘控制的动作（核心：完全替代SpaceMouse）
     def _get_keyboard_action(self):
         # 6D动作: [x, y, z, roll, pitch, yaw]
         action = np.zeros(6)
         step = 0.5  # 动作强度，可调节
+        now = time.time()
 
-        # ====== 位置控制 WASD + QE ======
+        def active(key_name):
+            return self.key_states.get(key_name, False) or (
+                now - self.key_press_times.get(key_name, -np.inf) < self.key_latch_seconds
+            )
+
+        # ====== 位置控制 WASD + RF ======
         # X轴前后：W/S
-        if self.key_states.get('w', False):
+        if active('w'):
             action[0] = step
-        if self.key_states.get('s', False):
+        if active('s'):
             action[0] = -step
 
         # Y轴左右：A/D
-        if self.key_states.get('a', False):
+        if active('a'):
             action[1] = step
-        if self.key_states.get('d', False):
+        if active('d'):
             action[1] = -step
 
-        # Z轴上下：Q/E
-        if self.key_states.get('q', False):
+        # Z轴上下：R/F
+        if active('r'):
             action[2] = step
-        if self.key_states.get('e', False):
+        if active('f'):
             action[2] = -step
 
         # ====== 姿态控制 方向键 ======
         # 上下俯仰：↑/↓
-        if self.key_states.get(self.keyboard.Key.up, False):
+        if active(self.keyboard.Key.up):
             action[4] = step
-        if self.key_states.get(self.keyboard.Key.down, False):
+        if active(self.keyboard.Key.down):
             action[4] = -step
 
         # 左右旋转：←/→
-        if self.key_states.get(self.keyboard.Key.left, False):
+        if active(self.keyboard.Key.left):
             action[5] = step
-        if self.key_states.get(self.keyboard.Key.right, False):
+        if active(self.keyboard.Key.right):
             action[5] = -step
 
-        # ====== 夹爪按键：F = 闭合，G = 张开 ======
-        left = self.key_states.get('f', False)   # 左键映射：F
-        right = self.key_states.get('g', False) # 右键映射：G
+        # ====== 夹爪按键：O = 张开，C/V = 闭合 ======
+        left = active('c') or active('v')
+        right = active('o')
 
         return action, (left, right)
 
@@ -322,6 +342,8 @@ class SpacemouseIntervention(gym.ActionWrapper):
             expert_a = filtered_expert_a
 
         if intervened:
+            if self.debug_keyboard:
+                print(f"[KeyboardControl] action: {np.round(expert_a, 3)}")
             return expert_a, True
 
         return action, False

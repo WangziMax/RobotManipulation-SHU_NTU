@@ -7,11 +7,12 @@ import datetime
 from absl import app, flags
 from pynput import keyboard
 
+import local_imports  # noqa: F401
 from experiments.mappings import CONFIG_MAPPING
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string("exp_name", None, "Name of experiment corresponding to folder.")
-flags.DEFINE_integer("successes_needed", 200, "Number of successful transistions to collect.")
+flags.DEFINE_integer("successes_needed", 50, "Number of successful transistions to collect.")
 
 
 success_key = False
@@ -32,6 +33,8 @@ def main(_):
     config = CONFIG_MAPPING[FLAGS.exp_name]()
     env = config.get_environment(fake_env=False, save_video=False, classifier=False)
 
+    reset_count = 1
+    print(f"[record_success_fail] reset #{reset_count}")
     obs, _ = env.reset()
     successes = []
     failures = []
@@ -63,6 +66,11 @@ def main(_):
             failures.append(transition)
 
         if done or truncated:
+            reset_count += 1
+            print(
+                f"[record_success_fail] reset #{reset_count} "
+                f"(done={done}, truncated={truncated})"
+            )
             obs, _ = env.reset()
 
     if not os.path.exists("./classifier_data"):

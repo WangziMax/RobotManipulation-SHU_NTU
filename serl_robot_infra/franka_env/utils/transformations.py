@@ -25,10 +25,15 @@ def construct_adjoint_matrix(tcp_pose):
 
 def construct_transform_matrix(tcp_pose):
     """
-    Construct the transform matrix from given pose.
-    Used for the robot controlled by pose like provided franka delta pose controller.
-    :args: tcp_pose: (x, y, z, qx, qy, qz, qw)
+    Construct the end-effector-to-base rotation for a Cartesian delta.
+
+    Both linear and angular components use the order ``[x, y, z]``. The pose
+    quaternion uses ``[qx, qy, qz, qw]``.
     """
+    tcp_pose = np.asarray(tcp_pose, dtype=np.float64).reshape(-1)
+    if tcp_pose.size != 7 or not np.all(np.isfinite(tcp_pose)):
+        raise ValueError("tcp_pose must contain 7 finite values")
+
     rotation = R.from_quat(tcp_pose[3:]).as_matrix()
     transform_matrix = np.zeros((6, 6))
     transform_matrix[:3, :3] = rotation

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import glob
+import threading
 import time
 import jax
 import jax.numpy as jnp
@@ -11,9 +12,11 @@ from flax.training import checkpoints
 import os
 import copy
 import pickle as pkl
+from gymnasium import Wrapper
 from gymnasium.wrappers.record_episode_statistics import RecordEpisodeStatistics
 from natsort import natsorted
 
+import local_imports  # noqa: F401
 from serl_launcher.agents.continuous.sac import SACAgent
 from serl_launcher.agents.continuous.sac_hybrid_single import SACAgentHybridSingleArm
 from serl_launcher.agents.continuous.sac_hybrid_dual import SACAgentHybridDualArm
@@ -56,9 +59,43 @@ devices = jax.local_devices()
 num_devices = len(devices)
 sharding = jax.sharding.PositionalSharding(devices)
 
+manual_success_lock = threading.Lock()
+manual_success_requested = False
+
 
 def print_green(x):
     return print("\033[92m {}\033[00m".format(x))
+
+
+def request_manual_success():
+    global manual_success_requested
+    with manual_success_lock:
+        manual_success_requested = True
+
+
+def consume_manual_success():
+    global manual_success_requested
+    with manual_success_lock:
+        requested = manual_success_requested
+        manual_success_requested = False
+    return requested
+
+
+class EnterKeyRewardWrapper(Wrapper):
+    """Use an Enter key press as the actor's only positive reward."""
+
+    def step(self, action):
+        observation, _, terminated, truncated, info = self.env.step(action)
+        success = consume_manual_success()
+        reward = int(success)
+        terminated = bool(terminated or success)
+        info = dict(info)
+        info["succeed"] = success
+        return observation, reward, terminated, truncated, info
+
+    def reset(self, **kwargs):
+        consume_manual_success()
+        return self.env.reset(**kwargs)
 
 
 ##############################################################################
@@ -371,8 +408,10 @@ def main(_):
     env = config.get_environment(
         fake_env=FLAGS.learner,
         save_video=FLAGS.save_video,
-        classifier=True,
+        classifier=not FLAGS.actor,
     )
+    if FLAGS.actor:
+        env = EnterKeyRewardWrapper(env)
     env = RecordEpisodeStatistics(env)
 
     rng, sampling_rng = jax.random.split(rng)
@@ -503,19 +542,32 @@ def main(_):
         )
 
     elif FLAGS.actor:
+        from pynput import keyboard
+
         sampling_rng = jax.device_put(sampling_rng, sharding.replicate())
         data_store = QueuedDataStore(50000)  # the queue size on the actor
         intvn_data_store = QueuedDataStore(50000)
 
+        def on_press(key):
+            if key == keyboard.Key.enter:
+                request_manual_success()
+
+        listener = keyboard.Listener(on_press=on_press)
+        listener.start()
+
         # actor loop
         print_green("starting actor loop")
-        actor(
-            agent,
-            data_store,
-            intvn_data_store,
-            env,
-            sampling_rng,
-        )
+        print_green("Press Enter to mark the current episode as successful.")
+        try:
+            actor(
+                agent,
+                data_store,
+                intvn_data_store,
+                env,
+                sampling_rng,
+            )
+        finally:
+            listener.stop()
 
     else:
         raise NotImplementedError("Must be either a learner or an actor")

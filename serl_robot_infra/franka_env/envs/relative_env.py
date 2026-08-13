@@ -2,7 +2,7 @@ import copy
 from scipy.spatial.transform import Rotation as R
 import gymnasium as gym
 import numpy as np
-from gym import Env
+from gymnasium import Env
 from franka_env.utils.transformations import (
     construct_transform_matrix,
     construct_homogeneous_matrix,
@@ -74,8 +74,9 @@ class RelativeFrame(gym.Wrapper):
         Transform observations from spatial(base) frame into body(end-effector) frame
         using the transform matrix
         """
-        transform_inv = np.linalg.inv(self.transform_matrix)
-        obs["state"]["tcp_vel"] = transform_inv @ obs["state"]["tcp_vel"]
+        obs["state"]["tcp_vel"] = (
+            self.transform_matrix.T @ obs["state"]["tcp_vel"]
+        )
 
         if self.include_relative_pose:
             T_b_o = construct_homogeneous_matrix(obs["state"]["tcp_pose"])
@@ -93,7 +94,7 @@ class RelativeFrame(gym.Wrapper):
         Transform action from body(end-effector) frame into into spatial(base) frame
         using the transform matrix. 
         """
-        action = np.array(action)  # in case action is a jax read-only array
+        action = np.asarray(action, dtype=np.float64).copy()
         action[:6] = self.transform_matrix @ action[:6]
         return action
 
@@ -102,8 +103,8 @@ class RelativeFrame(gym.Wrapper):
         Transform action from spatial(base) frame into body(end-effector) frame
         using the transform matrix.
         """
-        action = np.array(action)
-        action[:6] = np.linalg.inv(self.transform_matrix) @ action[:6]
+        action = np.asarray(action, dtype=np.float64).copy()
+        action[:6] = self.transform_matrix.T @ action[:6]
         return action
 
 
@@ -179,11 +180,13 @@ class DualRelativeFrame(gym.Wrapper):
         Transform observations from spatial(base) frame into body(end-effector) frame
         using the transform matrix
         """
-        left_transform_inv = np.linalg.inv(self.left_transform_matrix)
-        obs["state"]["left/tcp_vel"] = left_transform_inv @ obs["state"]["left/tcp_vel"]
+        obs["state"]["left/tcp_vel"] = (
+            self.left_transform_matrix.T @ obs["state"]["left/tcp_vel"]
+        )
 
-        right_transform_inv = np.linalg.inv(self.right_transform_matrix)
-        obs["state"]["right/tcp_vel"] = right_transform_inv @ obs["state"]["right/tcp_vel"]
+        obs["state"]["right/tcp_vel"] = (
+            self.right_transform_matrix.T @ obs["state"]["right/tcp_vel"]
+        )
 
         if self.include_relative_pose:
             left_T_b_o = construct_homogeneous_matrix(obs["state"]["left/tcp_pose"])
@@ -210,7 +213,7 @@ class DualRelativeFrame(gym.Wrapper):
         Transform action from body(end-effector) frame into into spatial(base) frame
         using the transform matrix
         """
-        action = np.array(action)  # in case action is a jax read-only array
+        action = np.asarray(action, dtype=np.float64).copy()
         if len(action) == 12:
             action[:6] = self.left_transform_matrix @ action[:6]
             action[6:] = self.right_transform_matrix @ action[6:]
@@ -226,13 +229,13 @@ class DualRelativeFrame(gym.Wrapper):
         Transform action from spatial(base) frame into body(end-effector) frame
         using the transform matrix.
         """
-        action = np.array(action)
+        action = np.asarray(action, dtype=np.float64).copy()
         if len(action) == 12:
-            action[:6] = np.linalg.inv(self.left_transform_matrix) @ action[:6]
-            action[6:] = np.linalg.inv(self.right_transform_matrix) @ action[6:]
+            action[:6] = self.left_transform_matrix.T @ action[:6]
+            action[6:] = self.right_transform_matrix.T @ action[6:]
         elif len(action) == 14:
-            action[:6] = np.linalg.inv(self.left_transform_matrix) @ action[:6]
-            action[7:13] = np.linalg.inv(self.right_transform_matrix) @ action[7:13]
+            action[:6] = self.left_transform_matrix.T @ action[:6]
+            action[7:13] = self.right_transform_matrix.T @ action[7:13]
         else:
             raise ValueError("Action dimension not supported")
         return action

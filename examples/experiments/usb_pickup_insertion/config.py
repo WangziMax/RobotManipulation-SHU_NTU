@@ -19,42 +19,44 @@ from experiments.usb_pickup_insertion.wrapper import USBEnv, GripperPenaltyWrapp
 
 
 class EnvConfig(DefaultEnvConfig):
-    SERVER_URL: str = "http://127.0.0.1/"
+    SERVER_URL: str = "http://127.0.0.1:5000/"
     REALSENSE_CAMERAS = {
         "wrist_1": {
-            "serial_number": "127122270350",
+            "serial_number": "260722303785",
             "dim": (1280, 720),
             "exposure": 10500,
         },
         "wrist_2": {
-            "serial_number": "127122270146",
+            "serial_number": "346222073620",
             "dim": (1280, 720),
             "exposure": 10500,
         },
         "side_policy": {
-            "serial_number": "130322274175",
+            "serial_number": "346222073620",
             "dim": (1280, 720),
             "exposure": 13000,
         },
         "side_classifier": {
-            "serial_number": "130322274175",
+            "serial_number": "260722303785",
             "dim": (1280, 720),
             "exposure": 13000,
         },
     }
-    IMAGE_CROP = {"wrist_1": lambda img: img[50:-200, 200:-200],
-                  "wrist_2": lambda img: img[:-200, 200:-200],
-                  "side_policy": lambda img: img[250:500, 350:650],
-                  "side_classifier": lambda img: img[270:398, 500:628]}
-    TARGET_POSE = np.array([0.553,0.1769683108549487,0.25097833796596336, np.pi, 0, -np.pi/2])
-    RESET_POSE = TARGET_POSE + np.array([0, 0.03, 0.05, 0, 0, 0])
-    ACTION_SCALE = np.array([0.015, 0.1, 1])
+    IMAGE_CROP = {
+        "wrist_1": lambda img: img[200:-100, :-400],
+        "wrist_2": lambda img: img[:, :],          # 第二个再往左
+        "side_policy": lambda img: img[:, :],   # 第三个再往左
+        "side_classifier": lambda img: img[200:-100, :-400]# 第四个小幅往上
+    }
+    TARGET_POSE = np.array([0.42101025581359863,-0.1657578945159912,0.24081993103027344,3.128488213532255,-0.020740353508186926,0.7754992665888565])
+    RESET_POSE = TARGET_POSE + np.array([0, 0, 0.2, 0, 0, 0])
+    ACTION_SCALE = np.array([0.015, 0.1, 1])   #动作幅度归一化
     RANDOM_RESET = True
     DISPLAY_IMAGE = True
     RANDOM_XY_RANGE = 0.01
     RANDOM_RZ_RANGE = 0.1
-    ABS_POSE_LIMIT_HIGH = TARGET_POSE + np.array([0.03, 0.06, 0.05, 0.1, 0.1, 0.3])
-    ABS_POSE_LIMIT_LOW = TARGET_POSE - np.array([0.03, 0.01, 0.03, 0.1, 0.1, 0.3])
+    ABS_POSE_LIMIT_HIGH = TARGET_POSE + np.array([0.3, 0.3, 0.15, 0.2, 0.2, 0.2])
+    ABS_POSE_LIMIT_LOW = TARGET_POSE - np.array([0.3, 0.3, 0.15, 0.2, 0.2, 0.2])
     COMPLIANCE_PARAM = {
         "translational_stiffness": 2000,
         "translational_damping": 89,
@@ -130,7 +132,8 @@ class TrainConfig(DefaultTrainingConfig):
 
             def reward_func(obs):
                 sigmoid = lambda x: 1 / (1 + jnp.exp(-x))
-                return int(sigmoid(classifier(obs)) > 0.7 and obs["state"][0, 0] > 0.4)
+                p = sigmoid(classifier(obs)).reshape(-1)[0].item()
+                return int(p > 0.7 and obs["state"][0, 0] > 0.4)
 
             env = MultiCameraBinaryRewardClassifierWrapper(env, reward_func)
         env = GripperPenaltyWrapper(env, penalty=-0.02)

@@ -9,9 +9,32 @@ import time
 import threading
 from scipy.spatial.transform import Rotation as R
 from absl import app, flags
+import pyrobotiqgripper as rq
 
 # 引入 franky 库组件
-from franky import Robot, Gripper, Affine, CartesianMotion, JointMotion
+from franky import (
+    Robot,
+    CartesianVelocityMotion,
+    Duration,
+    JointMotion,
+    Twist,
+)
+
+
+VELOCITY_MOTION_DURATION_MS = 200
+TRANSLATIONAL_VELOCITY_GAIN = 5.0
+ROTATIONAL_VELOCITY_GAIN = 5.0
+MAX_LINEAR_VELOCITY = 0.10
+MAX_ANGULAR_VELOCITY = 0.50
+POSITION_TOLERANCE = 5e-4
+ORIENTATION_TOLERANCE = 5e-3
+
+
+def _clip_vector_norm(vector, max_norm):
+    norm = np.linalg.norm(vector)
+    if norm > max_norm:
+        return vector * (max_norm / norm)
+    return vector
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string(
@@ -21,7 +44,7 @@ flags.DEFINE_string(
     "gripper_ip", "192.168.1.114", "IP address of the robotiq gripper if being used"
 )
 flags.DEFINE_string(
-    "gripper_type", "Franka", "Type of gripper to use: Robotiq, Franka, or None"
+    "gripper_type", "Robotiq", "Type of gripper to use: Robotiq or None"
 )
 flags.DEFINE_list(
     "reset_joint_target",
@@ -49,6 +72,9 @@ class FrankaServer:
         self.gripper_type = gripper_type
 
         self.lock = threading.Lock()
+        # Flask runs request handlers concurrently; franky robot calls must not
+        # overlap with state reads or another motion command.
+        self.robot_lock = threading.RLock()
 
         # 1. 初始化 franky 机器人连接
         print(f"[Franka] Connecting to Franka via franky at {self.robot_ip}...")
@@ -86,53 +112,52 @@ class FrankaServer:
             if not self.robot:
                 return
 
-            # 1. 读取笛卡尔状态 (通过专属的 current_cartesian_state 属性)
-            cs = self.robot.current_cartesian_state
-            ee = cs.pose.end_effector_pose
-            pos_arr = np.asarray(ee.translation, dtype=np.float64)
+            with self.robot_lock:
+                # 1. 读取笛卡尔状态 (通过专属的 current_cartesian_state 属性)
+                cs = self.robot.current_cartesian_state
+                ee = cs.pose.end_effector_pose
+                pos_arr = np.asarray(ee.translation, dtype=np.float64)
 
-            # franky 内部四元数顺序为 [w, x, y, z]，此处统一转换为标准 [x, y, z, w] 传出
-            q_raw = np.asarray(ee.quaternion, dtype=np.float64)
-            if q_raw.shape[0] == 4:
-                q_xyzw = np.array([q_raw[1], q_raw[2], q_raw[3], q_raw[0]])
-            else:
-                q_xyzw = q_raw.copy()
-            norm = np.linalg.norm(q_xyzw)
-            if norm > 1e-8:
-                q_xyzw /= norm
+                # franky Affine 使用 [x, y, z, w] 四元数顺序。
+                q_xyzw = np.asarray(ee.quaternion, dtype=np.float64).copy()
+                norm = np.linalg.norm(q_xyzw)
+                if norm > 1e-8:
+                    q_xyzw /= norm
 
-            # 2. 读取外力和外力矩
-            new_force = np.zeros(3, dtype=np.float64)
-            new_torque = np.zeros(3, dtype=np.float64)
-            if hasattr(cs, 'wrench'):
-                w = cs.wrench
-                if hasattr(w, 'force'):
-                    new_force = np.asarray(w.force, dtype=np.float64)
-                if hasattr(w, 'torque'):
-                    new_torque = np.asarray(w.torque, dtype=np.float64)
+                # 2. 读取外力和外力矩
+                new_force = np.zeros(3, dtype=np.float64)
+                new_torque = np.zeros(3, dtype=np.float64)
+                if hasattr(cs, "wrench"):
+                    w = cs.wrench
+                    if hasattr(w, "force"):
+                        new_force = np.asarray(w.force, dtype=np.float64)
+                    if hasattr(w, "torque"):
+                        new_torque = np.asarray(w.torque, dtype=np.float64)
 
-            # 3. 读取关节状态 (通过专属的 current_joint_state 属性)
-            js = self.robot.current_joint_state
-            q_arr = np.asarray(js.position, dtype=np.float64).reshape(-1)
-            new_q = q_arr.copy() if q_arr.size == 7 else self.q.copy()
-            
-            new_dq = np.zeros(7, dtype=np.float64)
-            if hasattr(js, 'velocity'):
-                dq_arr = np.asarray(js.velocity, dtype=np.float64).reshape(-1)
-                if dq_arr.size == 7:
-                    new_dq = dq_arr.copy()
+                # 3. 读取关节状态 (通过专属的 current_joint_state 属性)
+                js = self.robot.current_joint_state
+                q_arr = np.asarray(js.position, dtype=np.float64).reshape(-1)
+                new_q = q_arr.copy() if q_arr.size == 7 else self.q.copy()
 
-            # 4. 计算雅可比矩阵与末端速度
-            new_jac = np.zeros((6, 7), dtype=np.float64)
-            new_vel = np.zeros(6, dtype=np.float64)
-            if self.model is not None and new_q.size == 7:
-                try:
-                    jac_raw = np.asarray(self.model.zero_jacobian(js), dtype=np.float64)
-                    if jac_raw.size == 42:
-                        new_jac = jac_raw.reshape(6, 7)
-                        new_vel = new_jac @ new_dq
-                except Exception:
-                    pass
+                new_dq = np.zeros(7, dtype=np.float64)
+                if hasattr(js, "velocity"):
+                    dq_arr = np.asarray(js.velocity, dtype=np.float64).reshape(-1)
+                    if dq_arr.size == 7:
+                        new_dq = dq_arr.copy()
+
+                # 4. 计算雅可比矩阵与末端速度
+                new_jac = np.zeros((6, 7), dtype=np.float64)
+                new_vel = np.zeros(6, dtype=np.float64)
+                if self.model is not None and new_q.size == 7:
+                    try:
+                        jac_raw = np.asarray(
+                            self.model.zero_jacobian(js), dtype=np.float64
+                        )
+                        if jac_raw.size == 42:
+                            new_jac = jac_raw.reshape(6, 7)
+                            new_vel = new_jac @ new_dq
+                    except Exception:
+                        pass
 
             # 线程锁保护：统一更新到类属性中
             with self.lock:
@@ -154,14 +179,16 @@ class FrankaServer:
     def stop_impedance(self):
         print("franky control layer stopped.")
         try:
-            self.robot.stop()
+            with self.robot_lock:
+                self.robot.stop()
         except Exception:
             pass
 
     def clear(self):
         """错误恢复"""
         try:
-            self.robot.recover_from_errors()
+            with self.robot_lock:
+                self.robot.recover_from_errors()
             print("franky: Recovered from errors.")
         except Exception as e:
             print(f"franky recovery failed: {e}")
@@ -172,7 +199,8 @@ class FrankaServer:
         print("RUNNING JOINT RESET via franky...")
         try:
             motion = JointMotion(self.reset_joint_target.tolist())
-            self.robot.move(motion)
+            with self.robot_lock:
+                self.robot.move(motion)
             print("RESET DONE")
         except Exception as e:
             print(f"Joint reset failed: {e}")
@@ -181,73 +209,137 @@ class FrankaServer:
         self._update_states()
         print("RESET FINISHED, Current Pos:", self.pos)
 
-    def move(self, pose: list):
-        """发送一次异步动作命令，不等待到位。"""
-        assert len(pose) == 7
+    def move(self, pose: list, asynchronous: bool = True):
+        """Servo toward an absolute Cartesian pose with Cartesian velocity control."""
+        target = np.asarray(pose, dtype=np.float64).reshape(-1)
+        if target.size != 7 or not np.all(np.isfinite(target)):
+            raise ValueError("pose must contain 7 finite values")
 
-        try:
-            self.robot.poll_motion()
-        except Exception:
-            self.robot.recover_from_errors()
-
-        target = np.asarray(pose, dtype=np.float64)
+        target = target.copy()
         quat = target[3:]
         norm = np.linalg.norm(quat)
-        target[3:] = quat / norm if norm > 1e-8 else np.array([0., 0., 0., 1.])
+        if norm <= 1e-8:
+            raise ValueError("pose quaternion must be non-zero")
+        target[3:] = quat / norm
 
-        x, y, z = target[:3]
-        qx, qy, qz, qw = target[3:]
+        with self.robot_lock:
+            try:
+                self.robot.poll_motion()
+            except Exception:
+                self.robot.recover_from_errors()
 
-        motion = CartesianMotion(Affine([x, y, z], [qw, qx, qy, qz]))
+            current_affine = (
+                self.robot.current_cartesian_state.pose.end_effector_pose
+            )
+            current_position = np.asarray(
+                current_affine.translation, dtype=np.float64
+            ).copy()
+            current_quaternion = np.asarray(
+                current_affine.quaternion, dtype=np.float64
+            ).copy()
+            current_quaternion_norm = np.linalg.norm(current_quaternion)
+            if current_quaternion_norm <= 1e-8:
+                raise RuntimeError("robot returned a zero pose quaternion")
+            current_quaternion /= current_quaternion_norm
 
-        self.robot.move(motion, asynchronous=True)
+            position_error = target[:3] - current_position
+            orientation_error = (
+                R.from_quat(target[3:])
+                * R.from_quat(current_quaternion).inv()
+            ).as_rotvec()
+
+            if np.linalg.norm(position_error) <= POSITION_TOLERANCE:
+                linear_velocity = np.zeros(3, dtype=np.float64)
+            else:
+                linear_velocity = _clip_vector_norm(
+                    TRANSLATIONAL_VELOCITY_GAIN * position_error,
+                    MAX_LINEAR_VELOCITY,
+                )
+
+            if np.linalg.norm(orientation_error) <= ORIENTATION_TOLERANCE:
+                angular_velocity = np.zeros(3, dtype=np.float64)
+            else:
+                angular_velocity = _clip_vector_norm(
+                    ROTATIONAL_VELOCITY_GAIN * orientation_error,
+                    MAX_ANGULAR_VELOCITY,
+                )
+
+            motion = CartesianVelocityMotion(
+                Twist(
+                    linear_velocity=linear_velocity,
+                    angular_velocity=angular_velocity,
+                ),
+                duration=Duration(VELOCITY_MOTION_DURATION_MS),
+            )
+            self.robot.move(motion, asynchronous=asynchronous)
 
 
-class FrankaGripperWrapper:
-    """包装真实的 Franka 官方夹爪硬件接口"""
-    def __init__(self, robot_ip):
-        print(f"[Gripper] Connecting to Franka Gripper at {robot_ip}...")
+class RobotiqGripperWrapper:
+    """Expose the existing server API through pyrobotiqgripper."""
+
+    OPEN_WIDTH_METERS = 0.08
+    CLOSED_WIDTH_METERS = 0.002
+    MAX_POSITION_BITS = 255
+    SLOW_CLOSE_SPEED = 128
+
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.gripper = None
+        self.gripper_pos = 0.0
+        print("[Gripper] Auto-detecting Robotiq gripper...")
         try:
-            self.gripper = Gripper(robot_ip)
-            self.gripper.homing()
-            self.gripper_pos = 0.08
-            print("[Gripper] Franka Gripper initialized and homed.")
+            # self.gripper = rq.RobotiqGripper()
+            self.gripper = rq.RobotiqGripper(com_port="/dev/ttyUSB2")
+            self.gripper.activate()
+            self._update_position()
+            print("[Gripper] Robotiq gripper initialized and activated.")
         except Exception as e:
-            print(f"[Gripper ERROR] Failed to initialize Franka Gripper: {e}")
+            print(f"[Gripper ERROR] Failed to initialize Robotiq gripper: {e}")
             self.gripper = None
-            self.gripper_pos = 0.0
+
+    def _update_position(self):
+        position_bits = int(self.gripper.position())
+        position_bits = int(np.clip(position_bits, 0, self.MAX_POSITION_BITS))
+        opening_ratio = 1.0 - position_bits / self.MAX_POSITION_BITS
+        width_range = self.OPEN_WIDTH_METERS - self.CLOSED_WIDTH_METERS
+        self.gripper_pos = self.CLOSED_WIDTH_METERS + opening_ratio * width_range
+        return self.gripper_pos
 
     def activate_gripper(self):
         if self.gripper:
-            try: self.gripper.homing()
-            except Exception: pass
+            with self.lock:
+                self.gripper.activate()
+                self._update_position()
 
     def reset_gripper(self):
         if self.gripper:
-            try: self.gripper.stop()
-            except Exception: pass
+            with self.lock:
+                self.gripper.reset()
 
     def open(self):
         if self.gripper:
-            self.gripper.move(0.08, 0.1)
-            self.gripper_pos = 0.08
+            with self.lock:
+                self.gripper.open()
+                self._update_position()
 
     def close(self):
         if self.gripper:
-            self.gripper.move(0.002, 0.1)
-            self.gripper_pos = 0.002
+            with self.lock:
+                self.gripper.close()
+                self._update_position()
 
     def close_slow(self):
         if self.gripper:
-            self.gripper.move(0.002, 0.05)
-            self.gripper_pos = 0.002
+            with self.lock:
+                self.gripper.close(speed=self.SLOW_CLOSE_SPEED)
+                self._update_position()
 
     def move(self, pos_val):
         if self.gripper:
-            # 将 0-255 映射到 0.0 到 0.08 米
-            meters = (np.clip(pos_val, 0, 255) / 255.0) * 0.08
-            self.gripper.move(meters, 0.1)
-            self.gripper_pos = meters
+            position_bits = int(np.clip(pos_val, 0, self.MAX_POSITION_BITS))
+            with self.lock:
+                self.gripper.move(position_bits)
+                self._update_position()
 
 
 ###############################################################################
@@ -255,7 +347,6 @@ class FrankaGripperWrapper:
 
 def main(_):
     ROBOT_IP = FLAGS.robot_ip
-    GRIPPER_IP = FLAGS.gripper_ip
     GRIPPER_TYPE = FLAGS.gripper_type
     RESET_JOINT_TARGET = FLAGS.reset_joint_target
 
@@ -270,11 +361,13 @@ def main(_):
     robot_server.start_impedance()
 
     # 初始化夹爪控制器
-    if GRIPPER_TYPE == "Robotiq":
-        from robot_servers.robotiq_gripper_server import RobotiqGripperServer
-        gripper_server = RobotiqGripperServer(gripper_ip=GRIPPER_IP)
-    elif GRIPPER_TYPE == "Franka":
-        gripper_server = FrankaGripperWrapper(ROBOT_IP)
+    if GRIPPER_TYPE in ("Robotiq", "Franka"):
+        if GRIPPER_TYPE == "Franka":
+            print(
+                "[Gripper WARN] gripper_type=Franka is treated as Robotiq for "
+                "backward compatibility."
+            )
+        gripper_server = RobotiqGripperWrapper()
     elif GRIPPER_TYPE == "None":
         gripper_server = None
     else:
@@ -406,9 +499,26 @@ def main(_):
 
     @webapp.route("/pose", methods=["POST"])
     def pose():
-        pos = np.array(request.json["arr"])  
-        robot_server.move(pos)  # 此时此处会阻塞直到动作结束或超时，随后返回 "Moved"
+        payload = request.get_json(silent=True) or {}
+        try:
+            robot_server.move(payload.get("arr", []))
+        except (TypeError, ValueError) as exc:
+            return jsonify({"error": str(exc)}), 400
         return "Moved"
+
+    @webapp.route("/pose_sync", methods=["POST"])
+    def pose_sync():
+        payload = request.get_json(silent=True) or {}
+        try:
+            robot_server.move(payload.get("arr", []), asynchronous=True)
+        except (TypeError, ValueError) as exc:
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            return jsonify({"error": str(exc)}), 500
+        robot_server._update_states()
+        with robot_server.lock:
+            actual_pose = robot_server.pos.tolist()
+        return jsonify({"status": "Moved", "pose": actual_pose})
 
     @webapp.route("/getstate", methods=["POST"])
     def get_state():
