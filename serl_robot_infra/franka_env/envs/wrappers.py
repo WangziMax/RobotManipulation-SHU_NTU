@@ -16,24 +16,39 @@ sigmoid = lambda x: 1 / (1 + np.exp(-x))
 class HumanClassifierWrapper(gym.Wrapper):
     def __init__(self, env):
         super().__init__(env)
-    
+        try:
+            from pynput import keyboard
+        except ImportError as exc:
+            raise RuntimeError(
+                "HumanClassifierWrapper requires pynput and an available X display."
+            ) from exc
+
+        self.keyboard = keyboard
+        self.success_key = False
+        self.listener = keyboard.Listener(on_press=self._on_press)
+        self.listener.start()
+
+    def _on_press(self, key):
+        if key == self.keyboard.Key.enter:
+            self.success_key = True
+
     def step(self, action):
         obs, rew, done, truncated, info = self.env.step(action)
-        if done:
-            while True:
-                try:
-                    rew = int(input("Success? (1/0)"))
-                    assert rew == 0 or rew == 1
-                    break
-                except:
-                    continue
-        info['succeed'] = rew
+        if self.success_key:
+            rew = 1
+            done = True
+            info['succeed'] = True
+            self.success_key = False
+        else:
+            info['succeed'] = False
         return obs, rew, done, truncated, info
-    
+
     def reset(self, **kwargs):
+        self.success_key = False
         obs, info = self.env.reset(**kwargs)
+        info['succeed'] = False
         return obs, info
-    
+        
 class MultiCameraBinaryRewardClassifierWrapper(gym.Wrapper):
     """
     This wrapper uses the camera images to compute the reward,

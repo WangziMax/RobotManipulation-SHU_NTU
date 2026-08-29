@@ -14,7 +14,7 @@ class DefaultTrainingConfig:
     replay_buffer_capacity: int = 200000
 
     random_steps: int = 0
-    training_starts: int = 50
+    training_starts: int = 40
     steps_per_update: int = 20
 
     log_period: int = 10

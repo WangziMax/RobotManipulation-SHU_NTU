@@ -6,7 +6,7 @@ import jax.numpy as jnp
 from franka_env.envs.wrappers import (
     Quat2EulerWrapper,
     SpacemouseIntervention,
-    MultiCameraBinaryRewardClassifierWrapper,
+    HumanClassifierWrapper,
 )
 from franka_env.envs.relative_env import RelativeFrame
 from franka_env.envs.franka_env import DefaultEnvConfig
@@ -51,12 +51,12 @@ class EnvConfig(DefaultEnvConfig):
     TARGET_POSE = np.array([0.42101025581359863,-0.1657578945159912,0.24081993103027344,3.128488213532255,-0.020740353508186926,0.7754992665888565])
     RESET_POSE = TARGET_POSE + np.array([0, 0, 0.2, 0, 0, 0])
     ACTION_SCALE = np.array([0.015, 0.1, 1])   #动作幅度归一化
-    RANDOM_RESET = True
+    RANDOM_RESET = False
     DISPLAY_IMAGE = True
     RANDOM_XY_RANGE = 0.01
     RANDOM_RZ_RANGE = 0.1
     ABS_POSE_LIMIT_HIGH = TARGET_POSE + np.array([0.3, 0.3, 0.15, 0.2, 0.2, 0.2])
-    ABS_POSE_LIMIT_LOW = TARGET_POSE - np.array([0.3, 0.3, 0.15, 0.2, 0.2, 0.2])
+    ABS_POSE_LIMIT_LOW = TARGET_POSE - np.array([0.3, 0.3, 0.1, 0.2, 0.2, 0.2])
     COMPLIANCE_PARAM = {
         "translational_stiffness": 2000,
         "translational_damping": 89,
@@ -123,18 +123,6 @@ class TrainConfig(DefaultTrainingConfig):
         env = SERLObsWrapper(env, proprio_keys=self.proprio_keys)
         env = ChunkingWrapper(env, obs_horizon=1, act_exec_horizon=None)
         if classifier:
-            classifier = load_classifier_func(
-                key=jax.random.PRNGKey(0),
-                sample=env.observation_space.sample(),
-                image_keys=self.classifier_keys,
-                checkpoint_path=os.path.abspath("classifier_ckpt/"),
-            )
-
-            def reward_func(obs):
-                sigmoid = lambda x: 1 / (1 + jnp.exp(-x))
-                p = sigmoid(classifier(obs)).reshape(-1)[0].item()
-                return int(p > 0.7 and obs["state"][0, 0] > 0.4)
-
-            env = MultiCameraBinaryRewardClassifierWrapper(env, reward_func)
+            env = HumanClassifierWrapper(env)
         env = GripperPenaltyWrapper(env, penalty=-0.02)
         return env

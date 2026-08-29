@@ -5,29 +5,19 @@ import copy
 import pickle as pkl
 import datetime
 from absl import app, flags
-from pynput import keyboard
+import time
 
-import local_imports  # noqa: F401
+import local_imports 
 from experiments.mappings import CONFIG_MAPPING
 
 FLAGS = flags.FLAGS
 flags.DEFINE_string("exp_name", None, "Name of experiment corresponding to folder.")
 flags.DEFINE_integer("successes_needed", 20, "Number of successful demos to collect.")
 
-success_key = False
-def on_press(key):
-    global success_key
-    if key == keyboard.Key.enter:
-        success_key = True
-
 def main(_):
-    global success_key
-    listener = keyboard.Listener(on_press=on_press)
-    listener.start()
-
     assert FLAGS.exp_name in CONFIG_MAPPING, 'Experiment folder not found.'
     config = CONFIG_MAPPING[FLAGS.exp_name]()
-    env = config.get_environment(fake_env=False, save_video=False, classifier=False)
+    env = config.get_environment(fake_env=False, save_video=False, classifier=True)
     
     obs, info = env.reset()
     print("Reset done")
@@ -37,7 +27,6 @@ def main(_):
     pbar = tqdm(total=success_needed)
     trajectory = []
     returns = 0
-    episode_success = False
     
     while success_count < success_needed:
         actions = np.zeros(env.action_space.sample().shape) 
@@ -61,25 +50,14 @@ def main(_):
         pbar.set_description(f"Return: {returns}")
 
         obs = next_obs
-        if success_key:
-            trajectory[-1]["rewards"] = 1
-            trajectory[-1]["masks"] = 0.0
-            trajectory[-1]["dones"] = True
-            trajectory[-1]["infos"]["succeed"] = True
-            done = True
-            returns += 1 - rew
-            episode_success = True
-            success_key = False
-
-        if done or truncated:
-            if episode_success:
+        if done:
+            if info["succeed"]:
                 for transition in trajectory:
                     transitions.append(copy.deepcopy(transition))
                 success_count += 1
                 pbar.update(1)
             trajectory = []
             returns = 0
-            episode_success = False
             obs, info = env.reset()
             
     if not os.path.exists("./demo_data"):
@@ -89,7 +67,6 @@ def main(_):
     with open(file_name, "wb") as f:
         pkl.dump(transitions, f)
         print(f"saved {success_needed} demos to {file_name}")
-    listener.stop()
 
 if __name__ == "__main__":
     app.run(main)
